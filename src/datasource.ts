@@ -158,6 +158,7 @@ function toLogsFrame(input: any[]): MutableDataFrame {
   const applications: string[] = [];
   const subsystems: string[] = [];
   const messages: string[] = [];
+  const bodies: string[] = [];
   for (const r of input) {
     const metaObj = kvArrayToObject(r?.metadata);
     const labelObj = kvArrayToObject(r?.labels);
@@ -184,11 +185,14 @@ function toLogsFrame(input: any[]): MutableDataFrame {
       try {
         const ud = JSON.parse(r.userData);
         message = (ud?.log_obj?.message ?? ud?.message ?? JSON.stringify(ud));
+        bodies.push(String(ud?.body ?? ud?.log_obj?.body ?? ''));
       } catch (_) {
         message = r.userData;
+        bodies.push('');
       }
     } else {
       message = JSON.stringify(r);
+      bodies.push('');
     }
 
     times.push(ts);
@@ -207,6 +211,7 @@ function toLogsFrame(input: any[]): MutableDataFrame {
       { name: 'applicationname', type: FieldType.string, values: applications },
       { name: 'subsystemname', type: FieldType.string, values: subsystems },
       { name: 'message', type: FieldType.string, values: messages },
+      { name: 'body', type: FieldType.string, values: bodies },
     ],
   });
   (frame as any).meta = { preferredVisualisationType: 'logs' };
