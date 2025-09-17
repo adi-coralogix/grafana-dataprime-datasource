@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+!dist/plugin.json
+!dist/module.js
+
+# Release artifacts
+dist/release/*.zip
+
+# IDE/editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store

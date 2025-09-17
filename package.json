@@ -1,0 +1,20 @@
+{
+  "name": "coralogix-dataprime-datasource",
+  "version": "1.0.0",
+  "description": "Coralogix DataPrime datasource for Grafana",
+  "scripts": {
+    "build": "grafana-toolkit plugin:build",
+    "dev": "grafana-toolkit plugin:dev",
+    "test": "grafana-toolkit plugin:test"
+  },
+  "devDependencies": {
+    "@grafana/toolkit": "latest",
+    "@grafana/data": "latest",
+    "@grafana/ui": "latest",
+    "@grafana/runtime": "latest"
+  },
+  "dependencies": {
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0"
+  }
+}

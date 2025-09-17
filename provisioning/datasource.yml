@@ -1,0 +1,13 @@
+apiVersion: 1
+
+datasources:
+  - name: Coralogix DataPrime
+    type: coralogix-dataprime-datasource
+    access: proxy
+    isDefault: false
+    editable: true
+    jsonData:
+      region: eu1
+      baseUrl: https://api.eu1.coralogix.com
+    secureJsonData:
+      apiKey: ${CORALOGIX_API_KEY}
