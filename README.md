@@ -1,6 +1,7 @@
 # Coralogix DataPrime Grafana Datasource
 
-A frontend-only Grafana datasource plugin for querying Coralogix DataPrime (logs/spans) directly from Grafana Explore. It supports inline autocomplete for DataPrime, secure API key storage, region-aware base URLs, and rendering logs in Grafana’s native Logs view.
+A Grafana datasource plugin for querying Coralogix DataPrime (logs/spans) directly from Grafana Explore. 
+It supports inline autocomplete for DataPrime, secure API key storage, region-aware base URLs, and rendering logs in Grafana’s native Logs view.
 
 ## Features
 - Query Coralogix DataPrime (`source logs`, `filter`, `choose`, `countby`, `groupby`, `timechart`)
@@ -9,6 +10,11 @@ A frontend-only Grafana datasource plugin for querying Coralogix DataPrime (logs
 - Logs view support with fields in Log details (severity, applicationname, subsystemname, message)
 - UTC-safe timestamp normalization
 - Packaging script and provisioning examples
+
+<img width="569" height="261" alt="image" src="https://github.com/user-attachments/assets/22590897-eb34-4815-a1b4-10fca63474b8" />
+<img width="689" height="576" alt="image" src="https://github.com/user-attachments/assets/10c94650-b8c4-49d6-b321-1b09f863f73c" />
+<img width="1189" height="318" alt="image" src="https://github.com/user-attachments/assets/a6aac8a5-b414-4e14-9e23-4c006fc12130" />
+
 
 ## Requirements
 - Grafana >= 11.0
@@ -37,7 +43,7 @@ allow_loading_unsigned_plugins = coralogix-dataprime-datasource
 - Coralogix Personal API Key: stored securely
 
 ## Usage
-- Write queries in the single editor box. Under the hood the plugin forces DataPrime + Archive tier. If you do not include a `limit`, the plugin appends `| limit 15000`.
+- Write queries in the single editor box. Under the hood the plugin forces DataPrime + Archive tier.
 - Examples:
 ```
 source logs
