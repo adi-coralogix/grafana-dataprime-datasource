@@ -1,5 +1,5 @@
 import { DataSourceInstanceSettings, CoreApp, DataQueryRequest, DataQueryResponse, DataSourceApi, MutableDataFrame, FieldType } from '@grafana/data';
-import { getTemplateSrv } from '@grafana/runtime';
+import { getTemplateSrv, getBackendSrv } from '@grafana/runtime';
 import { CoralogixDataSourceOptions, CoralogixQuery } from './types';
 
 export class DataSource extends DataSourceApi<CoralogixQuery, CoralogixDataSourceOptions> {
@@ -23,18 +23,10 @@ export class DataSource extends DataSourceApi<CoralogixQuery, CoralogixDataSourc
     };
   }
 
-  private resolveBaseUrl(): string {
-    const cfg = this.instanceSettings.jsonData || {};
-    if (cfg.baseUrl && cfg.baseUrl.trim()) {
-      return cfg.baseUrl.replace(/\/$/, '');
-    }
-    const region = (cfg.region || 'eu1').trim();
-    return `https://api.${region}.coralogix.com`;
-  }
+  // No-op: routing via Grafana proxy, base URL resolved server-side
 
   async query(req: DataQueryRequest<CoralogixQuery>): Promise<DataQueryResponse> {
-    const cfg = this.instanceSettings.jsonData || {} as any;
-    const baseUrl = this.resolveBaseUrl();
+    const cfg = this.instanceSettings.jsonData || ({} as any);
     const apiKey = cfg.apiKey || '';
 
     const target = req.targets.find((t) => !t.hide && (t.text || '').trim());
@@ -59,34 +51,23 @@ export class DataSource extends DataSourceApi<CoralogixQuery, CoralogixDataSourc
       },
     };
 
-    const url = `${baseUrl}/api/v1/dataprime/query`;
-
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        method: 'POST',
+    // Route through Grafana server proxy to avoid browser CORS
+    const proxyPath = `/api/datasources/proxy/${this.instanceSettings.id}/api/v1/dataprime/query`;
+    const text = await getBackendSrv()
+      .post(proxyPath, body, {
         headers: {
           'Content-Type': 'application/json',
           ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
         },
-        body: JSON.stringify(body),
-      });
-    } catch (err: any) {
-      throw new Error(`Network error calling Coralogix: ${err?.message || err}`);
-    }
-
-    if (!res.ok) {
-      const textErr = await res.text().catch(() => '');
-      throw new Error(`Coralogix HTTP ${res.status}: ${textErr.slice(0, 500)}`);
-    }
-
-    const text = await res.text();
+        responseType: 'text',
+      })
+      .then((r: any) => (typeof r === 'string' ? r : (r?.data ?? '')));
 
     // Try NDJSON first
     const lines = text
       .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter((l) => l && l.startsWith('{'));
+      .map((l: string) => l.trim())
+      .filter((l: string) => l && l.startsWith('{'));
     const ndRows = collectRowsFromLines(lines);
     if (ndRows.length > 0) {
       // Detect aggregation results (e.g., countby $m.severity)
@@ -181,22 +162,32 @@ function toLogsFrame(input: any[]): MutableDataFrame {
     }
 
     let message = '';
+    let userObj: any = {};
     if (typeof r?.userData === 'string') {
       try {
         const ud = JSON.parse(r.userData);
         message = (ud?.log_obj?.message ?? ud?.message ?? JSON.stringify(ud));
         bodies.push(String(ud?.body ?? ud?.log_obj?.body ?? ''));
+        userObj = ud;
       } catch (_) {
         message = r.userData;
         bodies.push('');
+        userObj = { raw: r.userData };
       }
     } else {
       message = JSON.stringify(r);
       bodies.push('');
+      if (r?.userData && typeof r.userData === 'object') {
+        userObj = r.userData;
+      } else {
+        userObj = {};
+      }
     }
 
     times.push(ts);
-    lines.push(`${severity} ${message}`.trim());
+    // Emit a single JSON object so Grafana auto-parses log fields
+    const full = { m: metaObj, l: labelObj, d: userObj };
+    lines.push(JSON.stringify(full));
     severities.push(String(severity || ''));
     applications.push(String(labelObj?.applicationname || ''));
     subsystems.push(String(labelObj?.subsystemname || ''));
