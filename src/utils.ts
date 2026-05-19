@@ -58,12 +58,18 @@ export function collectRowsFromLines(lines: string[]): DataPrimeResult[] {
   return rows;
 }
 
-export function looksLikeSeverityAggregation(rows: DataPrimeResult[]): boolean {
+const COUNT_KEYS = new Set(['_count', 'count']);
+
+/**
+ * Returns true when the rows look like aggregation output — i.e. they carry a
+ * count field (_count or count) but are NOT log rows (log rows have a metadata
+ * array with per-row key-value pairs).
+ */
+export function looksLikeAggregation(rows: DataPrimeResult[]): boolean {
   return rows.some((r) => {
     const keys = Object.keys(r);
     return (
       (keys.includes('_count') || keys.includes('count')) &&
-      keys.includes('severity') &&
       !Array.isArray(r.metadata)
     );
   });
@@ -130,19 +136,48 @@ export function toLogsFrame(input: DataPrimeResult[]): MutableDataFrame {
   return frame;
 }
 
-export function toSeverityAggregateSeries(rows: DataPrimeResult[], atMs: number): MutableDataFrame[] {
-  const bySev: Record<string, number> = {};
+/**
+ * Convert aggregation rows into Grafana graph series.
+ * Groups by every non-count field so this works for any DataPrime `countby`
+ * expression — severity, applicationname, subsystemname, or multi-dimensional.
+ */
+export function toAggregateFrames(rows: DataPrimeResult[], atMs: number): MutableDataFrame[] {
+  type Group = { labels: Record<string, string>; count: number };
+  const groups = new Map<string, Group>();
+
   for (const r of rows) {
-    const sev = String(r.severity ?? '').trim() || 'unknown';
+    const labels: Record<string, string> = {};
+    for (const [key, val] of Object.entries(r)) {
+      if (!COUNT_KEYS.has(key)) {
+        labels[key] = String(val ?? '');
+      }
+    }
+    // Stable key: sort fields so insertion order doesn't matter
+    const groupKey = Object.keys(labels)
+      .sort()
+      .map((k) => `${k}=${labels[k]}`)
+      .join('\x00');
+
     const count = Number(r._count ?? r.count ?? 0) || 0;
-    bySev[sev] = (bySev[sev] ?? 0) + count;
+    const existing = groups.get(groupKey);
+    if (existing) {
+      existing.count += count;
+    } else {
+      groups.set(groupKey, { labels, count });
+    }
   }
-  return Object.entries(bySev).map(([sev, count]) => {
+
+  return Array.from(groups.values()).map(({ labels, count }) => {
+    const name =
+      Object.entries(labels)
+        .map(([k, v]) => `${k}="${v}"`)
+        .join(' ') || 'aggregation';
+
     const frame = new MutableDataFrame({
-      name: `logs ${sev}`,
+      name,
       fields: [
         { name: 'time', type: FieldType.time, values: [atMs] },
-        { name: 'value', type: FieldType.number, values: [count], labels: { severity: sev } },
+        { name: 'value', type: FieldType.number, values: [count], labels },
       ],
     });
     frame.meta = { preferredVisualisationType: 'graph' };

@@ -2,11 +2,11 @@ import {
   kvArrayToObject,
   parseTimestampToMs,
   collectRowsFromLines,
-  looksLikeSeverityAggregation,
+  looksLikeAggregation,
   toLogsFrame,
-  toSeverityAggregateSeries,
+  toAggregateFrames,
 } from '../utils';
-import { DataPrimeKeyValue, DataPrimeResult } from '../types';
+import type { DataPrimeKeyValue, DataPrimeResult } from '../types';
 import { FieldType } from '@grafana/data';
 
 // ---------------------------------------------------------------------------
@@ -48,8 +48,7 @@ describe('parseTimestampToMs', () => {
   });
 
   it('treats ISO string without timezone as UTC', () => {
-    const result = parseTimestampToMs('2023-11-14T22:13:20');
-    expect(result).toBe(Date.parse('2023-11-14T22:13:20Z'));
+    expect(parseTimestampToMs('2023-11-14T22:13:20')).toBe(Date.parse('2023-11-14T22:13:20Z'));
   });
 
   it('returns Date.now() for undefined input', () => {
@@ -99,31 +98,36 @@ describe('collectRowsFromLines', () => {
 });
 
 // ---------------------------------------------------------------------------
-// looksLikeSeverityAggregation
+// looksLikeAggregation
 // ---------------------------------------------------------------------------
-describe('looksLikeSeverityAggregation', () => {
-  it('returns true when rows have _count + severity and no metadata array', () => {
+describe('looksLikeAggregation', () => {
+  it('returns true for rows with _count and no metadata array', () => {
     const rows: DataPrimeResult[] = [{ _count: 42, severity: 'Error' }];
-    expect(looksLikeSeverityAggregation(rows)).toBe(true);
+    expect(looksLikeAggregation(rows)).toBe(true);
   });
 
-  it('returns true when rows have count (not _count)', () => {
+  it('returns true for rows with count (not _count)', () => {
     const rows: DataPrimeResult[] = [{ count: 5, severity: 'Info' }];
-    expect(looksLikeSeverityAggregation(rows)).toBe(true);
+    expect(looksLikeAggregation(rows)).toBe(true);
   });
 
-  it('returns false for log rows that have metadata array', () => {
+  it('returns true even without a severity field (generic countby)', () => {
+    const rows: DataPrimeResult[] = [{ applicationname: 'myapp', _count: 10 }];
+    expect(looksLikeAggregation(rows)).toBe(true);
+  });
+
+  it('returns false when metadata is an array (log rows)', () => {
     const rows: DataPrimeResult[] = [{ _count: 1, severity: 'Warn', metadata: [] }];
-    expect(looksLikeSeverityAggregation(rows)).toBe(false);
+    expect(looksLikeAggregation(rows)).toBe(false);
   });
 
   it('returns false for plain log rows', () => {
     const rows: DataPrimeResult[] = [{ userData: '{"message":"hi"}', metadata: [] }];
-    expect(looksLikeSeverityAggregation(rows)).toBe(false);
+    expect(looksLikeAggregation(rows)).toBe(false);
   });
 
   it('returns false for empty array', () => {
-    expect(looksLikeSeverityAggregation([])).toBe(false);
+    expect(looksLikeAggregation([])).toBe(false);
   });
 });
 
@@ -181,47 +185,80 @@ describe('toLogsFrame', () => {
 });
 
 // ---------------------------------------------------------------------------
-// toSeverityAggregateSeries
+// toAggregateFrames
 // ---------------------------------------------------------------------------
-describe('toSeverityAggregateSeries', () => {
+describe('toAggregateFrames', () => {
   const AT_MS = 1700000000000;
 
-  it('creates one series frame per severity level', () => {
+  it('creates one frame per unique dimension combination', () => {
     const rows: DataPrimeResult[] = [
       { severity: 'Error', _count: 10 },
       { severity: 'Info', _count: 25 },
     ];
-    const frames = toSeverityAggregateSeries(rows, AT_MS);
+    const frames = toAggregateFrames(rows, AT_MS);
     expect(frames).toHaveLength(2);
-    const names = frames.map((f) => f.name).sort();
-    expect(names).toEqual(['logs Error', 'logs Info']);
   });
 
-  it('sums counts for duplicate severity levels', () => {
+  it('sets labels from all non-count fields', () => {
+    const rows: DataPrimeResult[] = [{ severity: 'Error', _count: 3 }];
+    const frames = toAggregateFrames(rows, AT_MS);
+    const valueField = frames[0].fields.find((f) => f.name === 'value')!;
+    expect(valueField.labels).toEqual({ severity: 'Error' });
+  });
+
+  it('sums counts for duplicate dimension combinations', () => {
     const rows: DataPrimeResult[] = [
       { severity: 'Warn', _count: 3 },
       { severity: 'Warn', count: 7 },
     ];
-    const frames = toSeverityAggregateSeries(rows, AT_MS);
+    const frames = toAggregateFrames(rows, AT_MS);
     expect(frames).toHaveLength(1);
     expect(frames[0].fields.find((f) => f.name === 'value')!.values.get(0)).toBe(10);
   });
 
-  it('uses "unknown" for rows with no severity', () => {
-    const rows: DataPrimeResult[] = [{ _count: 5 }];
-    const frames = toSeverityAggregateSeries(rows, AT_MS);
-    expect(frames[0].name).toBe('logs unknown');
+  it('handles multi-dimensional aggregations', () => {
+    const rows: DataPrimeResult[] = [
+      { applicationname: 'app1', severity: 'Error', _count: 5 },
+      { applicationname: 'app1', severity: 'Info', _count: 15 },
+      { applicationname: 'app2', severity: 'Error', _count: 2 },
+    ];
+    const frames = toAggregateFrames(rows, AT_MS);
+    expect(frames).toHaveLength(3);
+  });
+
+  it('handles non-severity dimension (countby applicationname)', () => {
+    const rows: DataPrimeResult[] = [
+      { applicationname: 'frontend', _count: 100 },
+      { applicationname: 'backend', _count: 200 },
+    ];
+    const frames = toAggregateFrames(rows, AT_MS);
+    expect(frames).toHaveLength(2);
+    const names = frames.map((f) => f.name).sort();
+    expect(names).toEqual(['applicationname="backend"', 'applicationname="frontend"']);
+  });
+
+  it('is stable: dimension order in source row does not affect grouping', () => {
+    const rows: DataPrimeResult[] = [
+      { severity: 'Error', app: 'x', _count: 1 },
+      { app: 'x', severity: 'Error', _count: 2 }, // same dims, different key order
+    ];
+    const frames = toAggregateFrames(rows, AT_MS);
+    expect(frames).toHaveLength(1);
+    expect(frames[0].fields.find((f) => f.name === 'value')!.values.get(0)).toBe(3);
   });
 
   it('sets preferredVisualisationType to graph', () => {
     const rows: DataPrimeResult[] = [{ severity: 'Debug', _count: 1 }];
-    const frames = toSeverityAggregateSeries(rows, AT_MS);
-    expect(frames[0].meta?.preferredVisualisationType).toBe('graph');
+    expect(toAggregateFrames(rows, AT_MS)[0].meta?.preferredVisualisationType).toBe('graph');
   });
 
   it('pins the time point to atMs', () => {
     const rows: DataPrimeResult[] = [{ severity: 'Info', _count: 1 }];
-    const frames = toSeverityAggregateSeries(rows, AT_MS);
-    expect(frames[0].fields.find((f) => f.name === 'time')!.values.get(0)).toBe(AT_MS);
+    expect(toAggregateFrames(rows, AT_MS)[0].fields.find((f) => f.name === 'time')!.values.get(0)).toBe(AT_MS);
+  });
+
+  it('uses "aggregation" as name when there are no dimension fields', () => {
+    const rows: DataPrimeResult[] = [{ _count: 99 }];
+    expect(toAggregateFrames(rows, AT_MS)[0].name).toBe('aggregation');
   });
 });
