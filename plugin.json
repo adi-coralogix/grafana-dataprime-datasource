@@ -12,15 +12,27 @@
       "name": "Coralogix"
     },
     "keywords": ["coralogix", "dataprime", "logs"],
-    "version": "1.0.4",
-    "updated": "2025-09-16",
+    "version": "1.1.0",
+    "updated": "2026-05-19",
     "logos": {
-      "small": "img/logo.svg",
-      "large": "img/logo.svg"
+      "small": "img/logo-32.svg",
+      "large": "img/logo-128.svg"
     }
   },
   "dependencies": {
     "grafanaVersion": ">=11.0.0",
     "plugins": []
-  }
+  },
+  "routes": [
+    {
+      "path": "cx",
+      "url": "{{ .JsonData.baseUrl }}/api",
+      "headers": [
+        {
+          "name": "Authorization",
+          "content": "Bearer {{ .SecureJsonData.apiKey }}"
+        }
+      ]
+    }
+  ]
 }

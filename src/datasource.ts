@@ -1,46 +1,53 @@
-import { DataSourceInstanceSettings, CoreApp, DataQueryRequest, DataQueryResponse, DataSourceApi, MutableDataFrame, FieldType } from '@grafana/data';
-import { getTemplateSrv, getBackendSrv } from '@grafana/runtime';
-import { CoralogixDataSourceOptions, CoralogixQuery } from './types';
+import {
+  CoreApp,
+  DataQueryRequest,
+  DataQueryResponse,
+  DataSourceApi,
+  DataSourceInstanceSettings,
+  FieldType,
+  MutableDataFrame,
+  ScopedVars,
+} from '@grafana/data';
+import { getBackendSrv, getTemplateSrv } from '@grafana/runtime';
+import { CoralogixDataSourceOptions, CoralogixQuery, DataPrimeResponseEnvelope } from './types';
+import {
+  collectRowsFromLines,
+  looksLikeSeverityAggregation,
+  toLogsFrame,
+  toSeverityAggregateSeries,
+} from './utils';
 
 export class DataSource extends DataSourceApi<CoralogixQuery, CoralogixDataSourceOptions> {
+  private readonly instanceSettings: DataSourceInstanceSettings<CoralogixDataSourceOptions>;
+
   constructor(instanceSettings: DataSourceInstanceSettings<CoralogixDataSourceOptions>) {
     super(instanceSettings);
     this.instanceSettings = instanceSettings;
   }
 
-  private readonly instanceSettings: DataSourceInstanceSettings<CoralogixDataSourceOptions>;
-
   getDefaultQuery(_: CoreApp): Partial<CoralogixQuery> {
-    return {
-      text: 'source logs',
-    };
+    return { text: 'source logs' };
   }
 
-  applyTemplateVariables(query: CoralogixQuery, scopedVars: any): CoralogixQuery {
+  applyTemplateVariables(query: CoralogixQuery, scopedVars: ScopedVars): CoralogixQuery {
     return {
       ...query,
       text: getTemplateSrv().replace(query.text, scopedVars),
     };
   }
 
-  // No-op: routing via Grafana proxy, base URL resolved server-side
-
   async query(req: DataQueryRequest<CoralogixQuery>): Promise<DataQueryResponse> {
-    const cfg = this.instanceSettings.jsonData || ({} as any);
-    const apiKey = cfg.apiKey || '';
-
-    const target = req.targets.find((t) => !t.hide && (t.text || '').trim());
+    const target = req.targets.find((t) => !t.hide && (t.text ?? '').trim());
     if (!target) {
       return { data: [] };
     }
 
-    // Force DATAPRIME + ARCHIVE and inject default limit when not provided by user
-    let userQuery = String(target.text || '').trim();
+    let userQuery = String(target.text ?? '').trim();
     if (!/\blimit\s+\d+/i.test(userQuery)) {
       userQuery = userQuery ? `${userQuery} | limit 15000` : 'source logs | limit 15000';
     }
 
-    const body: any = {
+    const body = {
       query: userQuery,
       metadata: {
         tier: 'TIER_ARCHIVE',
@@ -51,53 +58,30 @@ export class DataSource extends DataSourceApi<CoralogixQuery, CoralogixDataSourc
       },
     };
 
-    // Route through Grafana server proxy to avoid browser CORS
-    const proxyPath = `/api/datasources/proxy/${this.instanceSettings.id}/api/v1/dataprime/query`;
-    const text = await getBackendSrv()
-      .post(proxyPath, body, {
-        headers: {
-          'Content-Type': 'application/json',
-          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-        },
-        responseType: 'text',
-      })
-      .then((r: any) => (typeof r === 'string' ? r : (r?.data ?? '')));
+    // Authorization is injected by Grafana's proxy via the plugin.json route —
+    // the API key never leaves the Grafana server.
+    const proxyPath = `/api/datasources/proxy/${this.instanceSettings.id}/cx/v1/dataprime/query`;
+    const rawResponse: unknown = await getBackendSrv().post(proxyPath, body, {
+      headers: { 'Content-Type': 'application/json' },
+      responseType: 'text',
+    });
+    const text = typeof rawResponse === 'string' ? rawResponse : '';
 
-    // Try NDJSON first
-    const lines = text
+    const ndLines = text
       .split(/\r?\n/)
-      .map((l: string) => l.trim())
-      .filter((l: string) => l && l.startsWith('{'));
-    const ndRows = collectRowsFromLines(lines);
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith('{'));
+
+    const ndRows = collectRowsFromLines(ndLines);
     if (ndRows.length > 0) {
-      // Detect aggregation results (e.g., countby $m.severity)
-      const isAgg = looksLikeSeverityAggregation(ndRows);
-      if (isAgg) {
-        const seriesFrames = toSeverityAggregateSeries(ndRows, req.range.to.valueOf());
-        seriesFrames.forEach((f) => ((f as any).refId = target.refId));
-        return { data: seriesFrames };
-      }
-      const logsFrame = toLogsFrame(ndRows);
-      logsFrame.refId = target.refId;
-      return { data: [logsFrame] };
+      return this.buildResponse(ndRows, target.refId, req.range.to.valueOf());
     }
 
-    // Fallback: JSON body
     try {
-      const json: any = JSON.parse(text);
-      const resultGroups: any[] = json?.result?.results || json?.response?.results?.results || [];
-      const rows = Array.isArray(resultGroups) ? resultGroups : [];
-      const isAgg = looksLikeSeverityAggregation(rows);
-      if (isAgg) {
-        const seriesFrames = toSeverityAggregateSeries(rows, req.range.to.valueOf());
-        seriesFrames.forEach((f) => ((f as any).refId = target.refId));
-        return { data: seriesFrames };
-      }
-      const logsFrame = toLogsFrame(rows);
-      logsFrame.refId = target.refId;
-      return { data: [logsFrame] };
-    } catch (e) {
-      // Last resort: show everything as a single _raw row
+      const json = JSON.parse(text) as DataPrimeResponseEnvelope;
+      const rows = json?.result?.results ?? json?.response?.results?.results ?? [];
+      return this.buildResponse(rows, target.refId, req.range.to.valueOf());
+    } catch {
       const raw = new MutableDataFrame({
         fields: [{ name: '_raw', type: FieldType.string, values: [text.slice(0, 1000)] }],
       });
@@ -106,152 +90,28 @@ export class DataSource extends DataSourceApi<CoralogixQuery, CoralogixDataSourc
     }
   }
 
+  private buildResponse(
+    rows: ReturnType<typeof collectRowsFromLines>,
+    refId: string,
+    atMs: number
+  ): DataQueryResponse {
+    if (looksLikeSeverityAggregation(rows)) {
+      const frames = toSeverityAggregateSeries(rows, atMs);
+      frames.forEach((f) => {
+        f.refId = refId;
+      });
+      return { data: frames };
+    }
+    const frame = toLogsFrame(rows);
+    frame.refId = refId;
+    return { data: [frame] };
+  }
+
   filterQuery(query: CoralogixQuery): boolean {
-    return !!query.text?.trim();
+    return Boolean(query.text?.trim());
   }
 
   async testDatasource() {
     return { status: 'success', message: 'OK' } as const;
   }
-}
-
-function collectRowsFromLines(lines: string[]): any[] {
-  const rows: any[] = [];
-  for (const line of lines) {
-    try {
-      const obj = JSON.parse(line);
-      const resultGroups: any[] = obj?.result?.results || obj?.response?.results?.results || [];
-      if (Array.isArray(resultGroups)) {
-        rows.push(...resultGroups);
-      }
-    } catch (_) {
-      // ignore
-    }
-  }
-  return rows;
-}
-
-// Build a Grafana logs frame (time + line)
-function toLogsFrame(input: any[]): MutableDataFrame {
-  const times: number[] = [];
-  const lines: string[] = [];
-  const severities: string[] = [];
-  const applications: string[] = [];
-  const subsystems: string[] = [];
-  const messages: string[] = [];
-  const bodies: string[] = [];
-  for (const r of input) {
-    const metaObj = kvArrayToObject(r?.metadata);
-    const labelObj = kvArrayToObject(r?.labels);
-    const severity = metaObj?.severity || '';
-    let tsStr = metaObj?.timestamp || metaObj?.timestampMicros;
-    let ts = Date.now();
-    if (typeof tsStr === 'string' && /^\d+$/.test(tsStr)) {
-      // numeric string in micros
-      ts = Math.floor(parseInt(tsStr, 10) / 1000);
-    } else if (typeof tsStr === 'number') {
-      // assume micros numeric
-      ts = Math.floor(tsStr / 1000);
-    } else if (typeof tsStr === 'string') {
-      // ISO string; if no timezone provided, treat as UTC
-      const iso = /Z|[+-]\d{2}:?\d{2}$/.test(tsStr) ? tsStr : `${tsStr.replace(/\s+$/, '')}Z`;
-      const parsed = Date.parse(iso);
-      if (!isNaN(parsed)) {
-        ts = parsed;
-      }
-    }
-
-    let message = '';
-    let userObj: any = {};
-    if (typeof r?.userData === 'string') {
-      try {
-        const ud = JSON.parse(r.userData);
-        message = (ud?.log_obj?.message ?? ud?.message ?? JSON.stringify(ud));
-        bodies.push(String(ud?.body ?? ud?.log_obj?.body ?? ''));
-        userObj = ud;
-      } catch (_) {
-        message = r.userData;
-        bodies.push('');
-        userObj = { raw: r.userData };
-      }
-    } else {
-      message = JSON.stringify(r);
-      bodies.push('');
-      if (r?.userData && typeof r.userData === 'object') {
-        userObj = r.userData;
-      } else {
-        userObj = {};
-      }
-    }
-
-    times.push(ts);
-    // Emit a single JSON object so Grafana auto-parses log fields
-    const full = { m: metaObj, l: labelObj, d: userObj };
-    lines.push(JSON.stringify(full));
-    severities.push(String(severity || ''));
-    applications.push(String(labelObj?.applicationname || ''));
-    subsystems.push(String(labelObj?.subsystemname || ''));
-    messages.push(String(message || ''));
-  }
-
-  const frame = new MutableDataFrame({
-    fields: [
-      { name: 'time', type: FieldType.time, values: times },
-      { name: 'line', type: FieldType.string, values: lines },
-      { name: 'severity', type: FieldType.string, values: severities },
-      { name: 'applicationname', type: FieldType.string, values: applications },
-      { name: 'subsystemname', type: FieldType.string, values: subsystems },
-      { name: 'message', type: FieldType.string, values: messages },
-      { name: 'body', type: FieldType.string, values: bodies },
-    ],
-  });
-  (frame as any).meta = { preferredVisualisationType: 'logs' };
-  return frame;
-}
-
-// removed per lint; we rely on aggregation-aware series only
-
-function kvArrayToObject(arr: any): any {
-  const obj: any = {};
-  if (Array.isArray(arr)) {
-    for (const kv of arr) {
-      const k = kv?.key;
-      const v = kv?.value;
-      if (k) {
-        obj[k] = v;
-      }
-    }
-  }
-  return obj;
-}
-
-// Detect results like: { "_count": N, "severity": "Info" }
-function looksLikeSeverityAggregation(rows: any[]): boolean {
-  return rows.some((r) => {
-    const keys = Object.keys(r || {});
-    return (keys.includes('_count') || keys.includes('count')) && keys.includes('severity') && !Array.isArray(r?.metadata);
-  });
-}
-
-// Build series for severity aggregation (single point per severity at range end)
-function toSeverityAggregateSeries(rows: any[], atMs: number): MutableDataFrame[] {
-  const bySev: Record<string, number> = {};
-  for (const r of rows) {
-    const sev = String((r?.severity ?? '') || '').trim() || 'unknown';
-    const count = Number(r?._count ?? r?.count ?? 0) || 0;
-    bySev[sev] = (bySev[sev] || 0) + count;
-  }
-  const frames: MutableDataFrame[] = [];
-  for (const [sev, count] of Object.entries(bySev)) {
-    const frame = new MutableDataFrame({
-      name: `logs ${sev}`,
-      fields: [
-        { name: 'time', type: FieldType.time, values: [atMs] },
-        { name: 'value', type: FieldType.number, values: [count], labels: { severity: sev } as any },
-      ],
-    });
-    (frame as any).meta = { preferredVisualisationType: 'graph' };
-    frames.push(frame);
-  }
-  return frames;
 }

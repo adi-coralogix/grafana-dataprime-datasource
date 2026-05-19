@@ -1,11 +1,11 @@
-import React, { ChangeEvent } from 'react';
+import React, { ChangeEvent, useEffect } from 'react';
 import { InlineField, InlineFieldRow, Input, Select, SecretInput } from '@grafana/ui';
 import { DataSourcePluginOptionsEditorProps } from '@grafana/data';
 import { CoralogixDataSourceOptions, CoralogixSecureJsonData } from './types';
 
-interface Props extends DataSourcePluginOptionsEditorProps<CoralogixDataSourceOptions, CoralogixSecureJsonData> {}
+type Props = DataSourcePluginOptionsEditorProps<CoralogixDataSourceOptions, CoralogixSecureJsonData>;
 
-const regionOptions = [
+const REGION_OPTIONS = [
   { label: 'EU1', value: 'eu1' },
   { label: 'EU2', value: 'eu2' },
   { label: 'US1', value: 'us1' },
@@ -15,12 +15,27 @@ const regionOptions = [
 ];
 
 function urlForRegion(region?: string): string {
-  const r = (region || 'eu1').trim();
-  return `https://api.${r}.coralogix.com`;
+  return `https://api.${(region ?? 'eu1').trim()}.coralogix.com`;
 }
 
 export function ConfigEditor({ onOptionsChange, options }: Props) {
   const { jsonData, secureJsonData, secureJsonFields } = options;
+
+  // Ensure baseUrl is always initialised so the Grafana proxy route can resolve it
+  useEffect(() => {
+    if (!jsonData.baseUrl) {
+      onOptionsChange({
+        ...options,
+        jsonData: {
+          ...jsonData,
+          region: jsonData.region || 'eu1',
+          baseUrl: urlForRegion(jsonData.region),
+        },
+      });
+    }
+    // Run only on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const onRegionChange = (value: string) => {
     onOptionsChange({
@@ -30,10 +45,9 @@ export function ConfigEditor({ onOptionsChange, options }: Props) {
   };
 
   const onApiKeyChange = (e: React.FormEvent<HTMLInputElement>) => {
-    const value = (e.currentTarget?.value ?? '') as string;
     onOptionsChange({
       ...options,
-      secureJsonData: { ...(secureJsonData ?? {}), apiKey: value },
+      secureJsonData: { ...(secureJsonData ?? {}), apiKey: e.currentTarget.value },
     });
   };
 
@@ -59,7 +73,7 @@ export function ConfigEditor({ onOptionsChange, options }: Props) {
           <Select
             width={20}
             value={jsonData.region || 'eu1'}
-            options={regionOptions}
+            options={REGION_OPTIONS}
             onChange={(option) => onRegionChange(option.value!)}
           />
         </InlineField>
@@ -73,7 +87,7 @@ export function ConfigEditor({ onOptionsChange, options }: Props) {
         </InlineField>
       </InlineFieldRow>
       <InlineFieldRow>
-        <InlineField label="Coralogix Personal API Key" tooltip="Stored as a secret">
+        <InlineField label="Coralogix Personal API Key" tooltip="Stored encrypted; injected by the Grafana proxy">
           <SecretInput
             width={40}
             isConfigured={Boolean(secureJsonFields?.apiKey)}

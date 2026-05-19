@@ -1,9 +1,21 @@
 {
   "compilerOptions": {
-    "rootDir": "./src",
-    "baseUrl": "./src",
-    "jsx": "react"
+    "target": "ES2018",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "jsx": "react",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "sourceMap": true,
+    "baseUrl": "src",
+    "rootDir": "src",
+    "outDir": "dist"
   },
-  "extends": "@grafana/toolkit/src/config/tsconfig.plugin.json",
-  "include": ["src", "types"]
+  "include": ["src"],
+  "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.test.tsx"]
 }

@@ -1,53 +1,65 @@
 import React from 'react';
-import { InlineField, InlineFieldRow, CodeEditor } from '@grafana/ui';
-import { QueryEditorProps } from '@grafana/data';
+import { CodeEditor, InlineField, InlineFieldRow } from '@grafana/ui';
+import type { QueryEditorProps } from '@grafana/data';
 import { DataSource } from './datasource';
-import { CoralogixDataSourceOptions, CoralogixQuery } from './types';
+import type { CoralogixDataSourceOptions, CoralogixQuery } from './types';
 
 type Props = QueryEditorProps<DataSource, CoralogixQuery, CoralogixDataSourceOptions>;
+// Derive Monaco types from @grafana/ui's CodeEditor so they always match
+type OnEditorMount = NonNullable<React.ComponentProps<typeof CodeEditor>['onEditorDidMount']>;
+type MonacoEditor = Parameters<OnEditorMount>[0];
+type Monaco = Parameters<OnEditorMount>[1];
 
-// Full DataPrime functions/commands (excluding 'source')
 const FUNCTIONS = [
-  'aggregate', 'block', 'bottom', 'choose', 'convert', 'count', 'countby', 'create', 'dedupeby', 'distinct', 'enrich', 'explode', 'extract', 'filter', 'find', 'groupby', 'join', 'limit', 'lucene', 'move', 'multigroupby', 'orderby', 'redact', 'remove', 'replace', 'stitch', 'top', 'union', 'wildfind', 'where', 'project', 'rename', 'sortby', 'lookup'
+  'aggregate', 'block', 'bottom', 'choose', 'convert', 'count', 'countby', 'create',
+  'dedupeby', 'distinct', 'enrich', 'explode', 'extract', 'filter', 'find', 'groupby',
+  'join', 'limit', 'lucene', 'move', 'multigroupby', 'orderby', 'redact', 'remove',
+  'replace', 'stitch', 'top', 'union', 'wildfind', 'where', 'project', 'rename',
+  'sortby', 'lookup',
 ];
 const KEYWORDS_FOR_COLOR = [...FUNCTIONS, 'source'];
-const FIELDS = ['$d.message', '$d.body', '$m.severity', '$m.timestamp', '$m.timestampMicros', '$l.applicationname', '$l.subsystemname'];
+const FIELDS = [
+  '$d.message', '$d.body',
+  '$m.severity', '$m.timestamp', '$m.timestampMicros',
+  '$l.applicationname', '$l.subsystemname',
+];
 const OPERATORS = ['==', '!=', 'in', 'not in', '=~', '!~', '>', '>=', '<', '<='];
 
-export function QueryEditor({ query, onChange, onRunQuery }: Props) {
+export function QueryEditor({ query, onChange, onRunQuery: _onRunQuery }: Props) {
   const onQueryTextChange = (value?: string) => {
     onChange({ ...query, text: value ?? '' });
   };
 
-  const { text } = query;
-
-  const onEditorMount = (editor: any, monaco: any) => {
+  const onEditorMount = (editor: MonacoEditor, monaco: Monaco) => {
     try {
-      if (!monaco.languages.getLanguages().some((l: any) => l.id === 'dataprime')) {
+      if (!monaco.languages.getLanguages().some((l) => l.id === 'dataprime')) {
         monaco.languages.register({ id: 'dataprime' });
       }
 
-      // Tokenizer + theme for colors similar to Coralogix
       monaco.languages.setMonarchTokensProvider('dataprime', {
         keywords: KEYWORDS_FOR_COLOR,
         operators: OPERATORS,
         tokenizer: {
           root: [
             [/\|/, 'operator'],
-            [/\$[dml]\.[a-zA-Z_][\w]*/, 'variable'],
-            [/[a-zA-Z_][\w]*/, {
-              cases: {
-                '@keywords': 'function',
-                '@default': 'identifier',
+            [/\$[dml]\.[a-zA-Z_]\w*/, 'variable'],
+            [
+              /[a-zA-Z_]\w*/,
+              {
+                cases: {
+                  '@keywords': 'function',
+                  '@default': 'identifier',
+                },
               },
-            }],
+            ],
             [/\d+/, 'number'],
             [/\s+/, 'white'],
-            [/\=~|!~|==|!=|>=|<=|>|</, 'operator'],
-            [/\'([^\\']|\\.)*\'/, 'string'],
+            [/=~|!~|==|!=|>=|<=|>|</, 'operator'],
+            [/'([^\\']|\\.)*'/, 'string'],
           ],
         },
       });
+
       monaco.editor.defineTheme('dataprime-dark', {
         base: 'vs-dark',
         inherit: true,
@@ -62,10 +74,9 @@ export function QueryEditor({ query, onChange, onRunQuery }: Props) {
       });
       monaco.editor.setTheme('dataprime-dark');
 
-      // Completion provider with context
       monaco.languages.registerCompletionItemProvider('dataprime', {
-        triggerCharacters: [' ', '|', '$', '.', '(', ',', '\'', '"', '='],
-        provideCompletionItems: (model: any, position: any) => {
+        triggerCharacters: [' ', '|', '$', '.', '(', ',', "'", '"', '='],
+        provideCompletionItems: (model, position) => {
           const word = model.getWordUntilPosition(position);
           const range = {
             startLineNumber: position.lineNumber,
@@ -74,63 +85,83 @@ export function QueryEditor({ query, onChange, onRunQuery }: Props) {
             endColumn: word.endColumn,
           };
 
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const suggestions: any[] = [];
           const line = model.getLineContent(position.lineNumber).slice(0, position.column - 1);
           const trimmed = line.trimEnd();
 
           const pushFuncs = () => {
             for (const f of FUNCTIONS) {
-              suggestions.push({ label: f, kind: monaco.languages.CompletionItemKind.Function, insertText: f + ' ', range, sortText: 'a' });
+              suggestions.push({
+                label: f,
+                kind: monaco.languages.CompletionItemKind.Function,
+                insertText: f + ' ',
+                range,
+                sortText: 'a',
+              });
             }
           };
           const pushFields = () => {
             for (const f of FIELDS) {
-              suggestions.push({ label: f, kind: monaco.languages.CompletionItemKind.Field, insertText: f, range, sortText: 'a' });
+              suggestions.push({
+                label: f,
+                kind: monaco.languages.CompletionItemKind.Field,
+                insertText: f,
+                range,
+                sortText: 'a',
+              });
             }
           };
           const pushOps = () => {
             for (const op of OPERATORS) {
-              suggestions.push({ label: op, kind: monaco.languages.CompletionItemKind.Operator, insertText: ' ' + op + ' ', range, sortText: 'b' });
+              suggestions.push({
+                label: op,
+                kind: monaco.languages.CompletionItemKind.Operator,
+                insertText: ' ' + op + ' ',
+                range,
+                sortText: 'b',
+              });
             }
           };
 
-          // 1) After pipe → only functions
           if (/\|\s*$/i.test(trimmed) || trimmed.length === 0) {
             pushFuncs();
             return { suggestions };
           }
 
-          // 2) After function name + space → fields
-          const fnMatch = /(?:^|\|\s*)([a-zA-Z_][\w]*)\s+$/.exec(trimmed);
+          const fnMatch = /(?:^|\|\s*)([a-zA-Z_]\w*)\s+$/.exec(trimmed);
           if (fnMatch && (FUNCTIONS as string[]).includes(fnMatch[1])) {
             pushFields();
             return { suggestions };
           }
 
-          // 3) After a field token → operators
-          if (/\$[dml]\.[a-zA-Z_][\w]*\s*$/.test(trimmed)) {
+          if (/\$[dml]\.[a-zA-Z_]\w*\s*$/.test(trimmed)) {
             pushOps();
             return { suggestions };
           }
 
-          // 4) Special: after `source ` suggest ONLY datasets logs/spans
           if (/\bsource\s+\S*$/.test(trimmed)) {
             for (const ds of ['logs', 'spans']) {
-              suggestions.push({ label: ds, kind: monaco.languages.CompletionItemKind.EnumMember, insertText: ds, range, sortText: 'a' });
+              suggestions.push({
+                label: ds,
+                kind: monaco.languages.CompletionItemKind.EnumMember,
+                insertText: ds,
+                range,
+                sortText: 'a',
+              });
             }
             return { suggestions };
           }
 
-          // Fallback: prefer functions, then fields
           pushFuncs();
           pushFields();
           return { suggestions };
         },
       });
 
-      const model = editor.getModel && editor.getModel();
-      if (model && model.getLanguageId && model.getLanguageId() !== 'dataprime') {
-        monaco.editor.setModelLanguage(model, 'dataprime');
+      const model = editor.getModel?.();
+      if (model?.getLanguageId?.() !== 'dataprime') {
+        monaco.editor.setModelLanguage(model!, 'dataprime');
       }
 
       editor.updateOptions({
@@ -139,22 +170,23 @@ export function QueryEditor({ query, onChange, onRunQuery }: Props) {
         suggestOnTriggerCharacters: true,
         wordBasedSuggestions: false,
       });
-      const triggerSuggest = () => editor.trigger('dp-inline', 'editor.action.triggerSuggest', {});
-      editor.onDidChangeModelContent(triggerSuggest);
-      setTimeout(triggerSuggest, 0);
-    } catch (e) {}
-  };
 
-  const editorValue =
-    text || "source logs | limit 100";
+      editor.onDidChangeModelContent(() => {
+        editor.trigger('dp-inline', 'editor.action.triggerSuggest', {});
+      });
+      setTimeout(() => editor.trigger('dp-inline', 'editor.action.triggerSuggest', {}), 0);
+    } catch (e) {
+      console.error('[DataPrime] Monaco initialisation failed:', e);
+    }
+  };
 
   return (
     <div className="gf-form-group">
       <InlineFieldRow>
         <InlineField label="Query" grow>
           <CodeEditor
-            language={'dataprime'}
-            value={editorValue}
+            language="dataprime"
+            value={query.text || 'source logs | limit 100'}
             onChange={onQueryTextChange}
             height={180}
             showMiniMap={false}
