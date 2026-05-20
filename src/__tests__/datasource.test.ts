@@ -60,6 +60,32 @@ function jsonText(rows: unknown[]): string {
   return JSON.stringify({ result: { results: rows } });
 }
 
+function makeSpanRow() {
+  return {
+    userData: JSON.stringify({
+      traceID: 'trace1',
+      spanID: 'span1',
+      parentId: '',
+      operationName: 'GET /health',
+      startTimeMillis: 1700000000000,
+      duration: 5000, // µs → 5 ms
+      process: { serviceName: 'my-service', tags: {} },
+      tags: { 'span.kind': 'server' },
+      references: [],
+      logs: null,
+    }),
+    metadata: [
+      { key: 'timestamp', value: '1700000000000000000' },
+      { key: 'duration', value: '5000' },
+    ],
+    labels: [
+      { key: 'applicationName', value: 'my-service' },
+      { key: 'serviceName', value: 'my-service' },
+      { key: 'subsystemName', value: 'http' },
+    ],
+  };
+}
+
 // ---------------------------------------------------------------------------
 // getDefaultQuery
 // ---------------------------------------------------------------------------
@@ -337,5 +363,69 @@ describe('DataSource.testDatasource', () => {
     mockPost.mockResolvedValue('');
     await buildDs().testDatasource();
     expect(mockPost.mock.calls[0][0]).toContain('/cx/');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// query — trace routing
+// ---------------------------------------------------------------------------
+describe('DataSource.query (trace routing)', () => {
+  beforeEach(() => {
+    mockPost.mockReset();
+    mockReplace.mockImplementation((t: string) => t);
+  });
+
+  it('routes "source spans" queries to a trace frame', async () => {
+    mockPost.mockResolvedValue(ndText([makeSpanRow()]));
+    const result = await buildDs().query(makeRequest([{ refId: 'A', text: 'source spans' }]));
+    expect(result.data).toHaveLength(1);
+    const frame = result.data[0] as import('@grafana/data').MutableDataFrame;
+    expect(frame.meta?.preferredVisualisationType).toBe('trace');
+  });
+
+  it('trace frame carries the correct refId', async () => {
+    mockPost.mockResolvedValue(ndText([makeSpanRow()]));
+    const result = await buildDs().query(makeRequest([{ refId: 'T', text: 'source spans' }]));
+    const frame = result.data[0] as import('@grafana/data').MutableDataFrame;
+    expect(frame.refId).toBe('T');
+  });
+
+  it('trace frame contains all required fields', async () => {
+    mockPost.mockResolvedValue(ndText([makeSpanRow()]));
+    const result = await buildDs().query(makeRequest([{ refId: 'A', text: 'source spans' }]));
+    const frame = result.data[0] as import('@grafana/data').MutableDataFrame;
+    const names = frame.fields.map((f) => f.name);
+    for (const req of ['traceID', 'spanID', 'parentSpanID', 'operationName', 'serviceName', 'startTime', 'duration', 'tags']) {
+      expect(names).toContain(req);
+    }
+  });
+
+  it('routes "source spans | countby $m.kind" to aggregation, not trace', async () => {
+    const aggRow = { kind: 'server', _count: 10 };
+    mockPost.mockResolvedValue(ndText([aggRow]));
+    const result = await buildDs().query(
+      makeRequest([{ refId: 'A', text: 'source spans | countby $m.kind' }])
+    );
+    const frame = result.data[0] as import('@grafana/data').MutableDataFrame;
+    expect(frame.meta?.preferredVisualisationType).toBe('graph');
+  });
+
+  it('routes "source logs" queries to a logs frame, not trace', async () => {
+    const logRow = {
+      userData: '{"message":"test"}',
+      metadata: [{ key: 'severity', value: 'Info' }, { key: 'timestamp', value: '1700000000000000' }],
+      labels: [],
+    };
+    mockPost.mockResolvedValue(ndText([logRow]));
+    const result = await buildDs().query(makeRequest([{ refId: 'A', text: 'source logs' }]));
+    const frame = result.data[0] as import('@grafana/data').MutableDataFrame;
+    expect(frame.meta?.preferredVisualisationType).toBe('logs');
+  });
+
+  it('injects default limit for span queries without an explicit limit', async () => {
+    mockPost.mockResolvedValue(ndText([]));
+    await buildDs().query(makeRequest([{ refId: 'A', text: 'source spans' }]));
+    const body = mockPost.mock.calls[0][1] as { query: string };
+    expect(body.query).toMatch(/\| limit 15000/);
   });
 });

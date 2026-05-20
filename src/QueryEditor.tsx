@@ -1,7 +1,7 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { CodeEditor, InlineField, InlineFieldRow } from '@grafana/ui';
 import type { QueryEditorProps } from '@grafana/data';
-import { DataSource } from './datasource';
+import type { DataSource } from './datasource';
 import type { CoralogixDataSourceOptions, CoralogixQuery } from './types';
 
 type Props = QueryEditorProps<DataSource, CoralogixQuery, CoralogixDataSourceOptions>;
@@ -10,22 +10,46 @@ type OnEditorMount = NonNullable<React.ComponentProps<typeof CodeEditor>['onEdit
 type MonacoEditor = Parameters<OnEditorMount>[0];
 type Monaco = Parameters<OnEditorMount>[1];
 
+// Monaco is a module singleton — providers accumulate across re-renders unless disposed.
+let _completionDisposable: { dispose(): void } | undefined;
+
 const FUNCTIONS = [
   'aggregate', 'block', 'bottom', 'choose', 'convert', 'count', 'countby', 'create',
   'dedupeby', 'distinct', 'enrich', 'explode', 'extract', 'filter', 'find', 'groupby',
   'join', 'limit', 'lucene', 'move', 'multigroupby', 'orderby', 'redact', 'remove',
   'replace', 'stitch', 'top', 'union', 'wildfind', 'where', 'project', 'rename',
-  'sortby', 'lookup',
+  'sortby', 'lookup', 'timeseries',
 ];
 const KEYWORDS_FOR_COLOR = [...FUNCTIONS, 'source'];
-const FIELDS = [
-  '$d.message', '$d.body',
-  '$m.severity', '$m.timestamp', '$m.timestampMicros',
-  '$l.applicationname', '$l.subsystemname',
-];
 const OPERATORS = ['==', '!=', 'in', 'not in', '=~', '!~', '>', '>=', '<', '<='];
 
-export function QueryEditor({ query, onChange, onRunQuery: _onRunQuery }: Props) {
+// Fields per namespace, keyed by source type
+const FIELDS: Record<'logs' | 'spans', Record<'l' | 'm' | 'd', string[]>> = {
+  logs: {
+    l: ['applicationname', 'subsystemname', 'computerName', 'IPAddress', 'threadId', 'className', 'methodName'],
+    m: ['severity', 'timestamp', 'timestampMicros', 'logId', 'priorityClass', 'processingTimestamp'],
+    d: ['message', 'body', 'msg', 'level', 'levelname', 'trace_id', 'span_id', 'traceId', 'spanId'],
+  },
+  spans: {
+    l: ['applicationName', 'subsystemName', 'serviceName', 'operationName'],
+    m: ['traceId', 'spanId', 'parentSpanId', 'name', 'startTimeUnixNano', 'durationNano', 'kind', 'statusCode', 'statusMessage'],
+    d: ['traceID', 'spanID', 'operationName', 'duration', 'startTime', 'parentId', 'process.serviceName'],
+  },
+};
+
+export function QueryEditor({ query, onChange }: Props) {
+  // When Grafana navigates to a linked span it sets query.query to the traceID.
+  // Synthesize the DataPrime filter so Monaco reflects what's actually running.
+  useEffect(() => {
+    if (query.query && /^[0-9a-f]{16,64}$/i.test(query.query.trim())) {
+      const synthesized = `source spans | filter $d.traceID == '${query.query.trim()}'`;
+      if (query.text !== synthesized) {
+        onChange({ ...query, text: synthesized });
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query.query]);
+
   const onQueryTextChange = (value?: string) => {
     onChange({ ...query, text: value ?? '' });
   };
@@ -74,87 +98,155 @@ export function QueryEditor({ query, onChange, onRunQuery: _onRunQuery }: Props)
       });
       monaco.editor.setTheme('dataprime-dark');
 
-      monaco.languages.registerCompletionItemProvider('dataprime', {
+      // Dispose any previously registered provider so re-renders don't stack duplicates
+      _completionDisposable?.dispose();
+      _completionDisposable = monaco.languages.registerCompletionItemProvider('dataprime', {
         triggerCharacters: [' ', '|', '$', '.', '(', ',', "'", '"', '='],
         provideCompletionItems: (model, position) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const suggestions: any[] = [];
+          const line = model.getLineContent(position.lineNumber).slice(0, position.column - 1);
+          const trimmed = line.trimEnd();
+          const fullText = model.getValue();
+          const source = /\bsource\s+spans\b/i.test(fullText) ? 'spans' : 'logs';
+
+          // Default range covers the current word
           const word = model.getWordUntilPosition(position);
-          const range = {
+          const wordRange = {
             startLineNumber: position.lineNumber,
             endLineNumber: position.lineNumber,
             startColumn: word.startColumn,
             endColumn: word.endColumn,
           };
 
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const suggestions: any[] = [];
-          const line = model.getLineContent(position.lineNumber).slice(0, position.column - 1);
-          const trimmed = line.trimEnd();
+          // ── Field reference: user typed $l.app, $m.trac, $d.mes, etc. ──
+          // Match captures: [0]=full "$l.foo", [1]=namespace, [2]=partial name after dot
+          const fieldRef = /\$([dml])\.(\w*)$/.exec(line);
+          if (fieldRef) {
+            const ns = fieldRef[1] as 'l' | 'm' | 'd';
+            const partial = fieldRef[2].toLowerCase();
+            // Replace from the '$' character so the whole "$l.foo" is replaced
+            const refRange = {
+              startLineNumber: position.lineNumber,
+              endLineNumber: position.lineNumber,
+              startColumn: position.column - fieldRef[0].length,
+              endColumn: position.column,
+            };
+            const candidates = FIELDS[source][ns] ?? [];
+            for (const name of candidates) {
+              if (!partial || name.toLowerCase().startsWith(partial)) {
+                suggestions.push({
+                  label: `$${ns}.${name}`,
+                  kind: monaco.languages.CompletionItemKind.Field,
+                  insertText: `$${ns}.${name}`,
+                  range: refRange,
+                  sortText: 'a',
+                });
+              }
+            }
+            // Also offer operators if field is complete
+            if (candidates.some((n) => n.toLowerCase() === partial)) {
+              for (const op of OPERATORS) {
+                suggestions.push({
+                  label: op,
+                  kind: monaco.languages.CompletionItemKind.Operator,
+                  insertText: ' ' + op + ' ',
+                  range: wordRange,
+                  sortText: 'b',
+                });
+              }
+            }
+            return { suggestions };
+          }
 
+          // ── Just typed '$': offer $d. $l. $m. namespaces ──
+          if (line.endsWith('$')) {
+            const dollarRange = {
+              startLineNumber: position.lineNumber,
+              endLineNumber: position.lineNumber,
+              startColumn: position.column - 1,
+              endColumn: position.column,
+            };
+            for (const ns of ['d', 'l', 'm']) {
+              suggestions.push({
+                label: `$${ns}.`,
+                kind: monaco.languages.CompletionItemKind.Field,
+                insertText: `$${ns}.`,
+                range: dollarRange,
+                command: { id: 'editor.action.triggerSuggest', title: '' },
+                sortText: 'a',
+              });
+            }
+            return { suggestions };
+          }
+
+          // ── After a field reference, offer operators ──
+          if (/\$[dml]\.[a-zA-Z_]\w*\s*$/.test(trimmed)) {
+            for (const op of OPERATORS) {
+              suggestions.push({
+                label: op,
+                kind: monaco.languages.CompletionItemKind.Operator,
+                insertText: ' ' + op + ' ',
+                range: wordRange,
+                sortText: 'b',
+              });
+            }
+            return { suggestions };
+          }
+
+          // ── After 'source', offer data sources (only when not yet followed by a pipe) ──
+          if (/(?:^|\|)\s*source\s+\w*$/.test(trimmed)) {
+            for (const ds of ['logs', 'spans']) {
+              suggestions.push({
+                label: ds,
+                kind: monaco.languages.CompletionItemKind.EnumMember,
+                insertText: ds,
+                range: wordRange,
+                sortText: 'a',
+              });
+            }
+            return { suggestions };
+          }
+
+          // ── After '|' or at start: offer functions ──
           const pushFuncs = () => {
             for (const f of FUNCTIONS) {
               suggestions.push({
                 label: f,
                 kind: monaco.languages.CompletionItemKind.Function,
                 insertText: f + ' ',
-                range,
+                range: wordRange,
                 sortText: 'a',
               });
             }
           };
-          const pushFields = () => {
-            for (const f of FIELDS) {
-              suggestions.push({
-                label: f,
-                kind: monaco.languages.CompletionItemKind.Field,
-                insertText: f,
-                range,
-                sortText: 'a',
-              });
-            }
-          };
-          const pushOps = () => {
-            for (const op of OPERATORS) {
-              suggestions.push({
-                label: op,
-                kind: monaco.languages.CompletionItemKind.Operator,
-                insertText: ' ' + op + ' ',
-                range,
-                sortText: 'b',
-              });
+          const pushAllFields = () => {
+            for (const ns of ['l', 'm', 'd'] as const) {
+              for (const name of FIELDS[source][ns]) {
+                suggestions.push({
+                  label: `$${ns}.${name}`,
+                  kind: monaco.languages.CompletionItemKind.Field,
+                  insertText: `$${ns}.${name}`,
+                  range: wordRange,
+                  sortText: 'a',
+                });
+              }
             }
           };
 
-          if (/\|\s*$/i.test(trimmed) || trimmed.length === 0) {
+          if (/\|\s*$/.test(trimmed) || trimmed.length === 0) {
             pushFuncs();
             return { suggestions };
           }
 
           const fnMatch = /(?:^|\|\s*)([a-zA-Z_]\w*)\s+$/.exec(trimmed);
           if (fnMatch && (FUNCTIONS as string[]).includes(fnMatch[1])) {
-            pushFields();
-            return { suggestions };
-          }
-
-          if (/\$[dml]\.[a-zA-Z_]\w*\s*$/.test(trimmed)) {
-            pushOps();
-            return { suggestions };
-          }
-
-          if (/\bsource\s+\S*$/.test(trimmed)) {
-            for (const ds of ['logs', 'spans']) {
-              suggestions.push({
-                label: ds,
-                kind: monaco.languages.CompletionItemKind.EnumMember,
-                insertText: ds,
-                range,
-                sortText: 'a',
-              });
-            }
+            pushAllFields();
             return { suggestions };
           }
 
           pushFuncs();
-          pushFields();
+          pushAllFields();
           return { suggestions };
         },
       });

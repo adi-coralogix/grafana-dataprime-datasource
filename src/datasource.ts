@@ -1,17 +1,16 @@
-import {
+import { DataSourceApi, FieldType, MutableDataFrame } from '@grafana/data';
+import type {
   CoreApp,
   DataFrame,
   DataQueryRequest,
   DataQueryResponse,
-  DataSourceApi,
   DataSourceInstanceSettings,
-  FieldType,
-  MutableDataFrame,
   ScopedVars,
 } from '@grafana/data';
 import { getBackendSrv, getTemplateSrv } from '@grafana/runtime';
-import { CoralogixDataSourceOptions, CoralogixQuery, DataPrimeResponseEnvelope } from './types';
-import { collectRowsFromLines, looksLikeAggregation, toAggregateFrames, toLogsFrame } from './utils';
+import type { CoralogixDataSourceOptions, CoralogixQuery, DataPrimeResponseEnvelope } from './types';
+import type { LogFrameConfig } from './utils';
+import { collectRowsFromLines, isSpanQuery, looksLikeAggregation, toAggregateFrames, toLogsFrame, toTraceFrame } from './utils';
 
 const DEFAULT_LIMIT = 15000;
 
@@ -23,7 +22,7 @@ export class DataSource extends DataSourceApi<CoralogixQuery, CoralogixDataSourc
     this.instanceSettings = instanceSettings;
   }
 
-  getDefaultQuery(_: CoreApp): Partial<CoralogixQuery> {
+  getDefaultQuery(_app: CoreApp): Partial<CoralogixQuery> {
     return { text: 'source logs' };
   }
 
@@ -59,17 +58,35 @@ export class DataSource extends DataSourceApi<CoralogixQuery, CoralogixDataSourc
     req: DataQueryRequest<CoralogixQuery>
   ): Promise<DataFrame[]> {
     let userQuery = String(target.text ?? '').trim();
+
+    // When Grafana's "View Linked Span" passes a traceID in target.query,
+    // synthesize a DataPrime filter instead of running the bare "source spans".
+    // Also widen the time window to ±12 h around now so the trace is always
+    // in range regardless of the dashboard's current time picker.
+    const isTraceIdNav = Boolean(target.query && /^[0-9a-f]{16,64}$/i.test(target.query.trim()));
+    if (isTraceIdNav) {
+      userQuery = `source spans | filter $d.traceID == '${target.query!.trim()}'`;
+    }
+
     if (!/\blimit\s+\d+/i.test(userQuery)) {
       userQuery = userQuery ? `${userQuery} | limit ${DEFAULT_LIMIT}` : `source logs | limit ${DEFAULT_LIMIT}`;
     }
+
+    const now = Date.now();
+    const startDate = isTraceIdNav
+      ? new Date(now - 12 * 60 * 60 * 1000).toISOString()
+      : req.range.from.toISOString();
+    const endDate = isTraceIdNav
+      ? new Date(now).toISOString()
+      : req.range.to.toISOString();
 
     const body = {
       query: userQuery,
       metadata: {
         tier: 'TIER_ARCHIVE',
         syntax: 'QUERY_SYNTAX_DATAPRIME',
-        startDate: req.range.from.toISOString(),
-        endDate: req.range.to.toISOString(),
+        startDate,
+        endDate,
         defaultSource: 'logs',
       },
     };
@@ -102,15 +119,20 @@ export class DataSource extends DataSourceApi<CoralogixQuery, CoralogixDataSourc
       .map((l) => l.trim())
       .filter((l) => l.startsWith('{'));
 
+    const logCfg: LogFrameConfig = {
+      datasourceUid: this.instanceSettings.uid,
+      datasourceName: this.instanceSettings.name,
+    };
+
     const ndRows = collectRowsFromLines(ndLines);
     if (ndRows.length > 0) {
-      return this.framify(ndRows, target.refId, req.range.to.valueOf());
+      return this.framify(ndRows, target.refId, req.range.to.valueOf(), userQuery, logCfg);
     }
 
     try {
       const json = JSON.parse(text) as DataPrimeResponseEnvelope;
       const rows = json?.result?.results ?? json?.response?.results?.results ?? [];
-      return this.framify(rows, target.refId, req.range.to.valueOf());
+      return this.framify(rows, target.refId, req.range.to.valueOf(), userQuery, logCfg);
     } catch {
       const raw = new MutableDataFrame({
         fields: [{ name: '_raw', type: FieldType.string, values: [text.slice(0, 1000)] }],
@@ -123,12 +145,19 @@ export class DataSource extends DataSourceApi<CoralogixQuery, CoralogixDataSourc
   private framify(
     rows: ReturnType<typeof collectRowsFromLines>,
     refId: string,
-    atMs: number
+    atMs: number,
+    query: string,
+    logCfg?: LogFrameConfig,
   ): MutableDataFrame[] {
-    const frames = looksLikeAggregation(rows)
-      ? toAggregateFrames(rows, atMs)
-      : [toLogsFrame(rows)];
-
+    let frames: MutableDataFrame[];
+    const isAgg = looksLikeAggregation(rows) || /\b(groupby|countby|count\s+by|aggregate|timeseries)\b/i.test(query);
+    if (isAgg) {
+      frames = toAggregateFrames(rows, atMs);
+    } else if (isSpanQuery(query)) {
+      frames = [toTraceFrame(rows)];
+    } else {
+      frames = [toLogsFrame(rows, logCfg)];
+    }
     frames.forEach((f) => {
       f.refId = refId;
     });

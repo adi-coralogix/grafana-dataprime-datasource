@@ -1,7 +1,8 @@
-import React, { ChangeEvent, useEffect } from 'react';
+import React, { useEffect } from 'react';
+import type { ChangeEvent } from 'react';
 import { InlineField, InlineFieldRow, Input, Select, SecretInput } from '@grafana/ui';
-import { DataSourcePluginOptionsEditorProps } from '@grafana/data';
-import { CoralogixDataSourceOptions, CoralogixSecureJsonData } from './types';
+import type { DataSourcePluginOptionsEditorProps } from '@grafana/data';
+import type { CoralogixDataSourceOptions, CoralogixSecureJsonData } from './types';
 
 type Props = DataSourcePluginOptionsEditorProps<CoralogixDataSourceOptions, CoralogixSecureJsonData>;
 

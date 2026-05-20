@@ -4,13 +4,14 @@
   "id": "coralogix-dataprime-datasource",
   "metrics": true,
   "logs": true,
+  "tracing": true,
   "backend": false,
   "info": {
     "description": "Query Coralogix Archive and Hot data using DataPrime syntax",
     "author": {
       "name": "Coralogix"
     },
-    "keywords": ["coralogix", "dataprime", "logs"],
+    "keywords": ["coralogix", "dataprime", "logs", "traces"],
     "version": "1.1.0",
     "updated": "2026-05-19",
     "logos": {
