@@ -7,6 +7,7 @@
   "tracing": true,
   "backend": true,
   "executable": "gpx_coralogix-dataprime-datasource",
+  "alerting": true,
   "info": {
     "description": "Query Coralogix Archive and Hot data using DataPrime syntax",
     "author": {
