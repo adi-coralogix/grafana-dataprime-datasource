@@ -3,7 +3,8 @@
   "version": "1.1.0",
   "description": "Coralogix DataPrime datasource for Grafana",
   "scripts": {
-    "build": "webpack --env production",
+    "build": "webpack --env production && go build -o dist/gpx_coralogix-dataprime-datasource_$(go env GOOS)_$(go env GOARCH) ./pkg/",
+    "build:backend": "go build -o dist/gpx_coralogix-dataprime-datasource_$(go env GOOS)_$(go env GOARCH) ./pkg/",
     "dev": "webpack --watch",
     "test": "jest --watch --onlyChanged",
     "test:ci": "jest --passWithNoTests --forceExit --coverage",

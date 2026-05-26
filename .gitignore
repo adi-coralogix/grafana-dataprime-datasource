@@ -5,6 +5,8 @@ node_modules/
 dist/
 !dist/plugin.json
 !dist/module.js
+# Go binaries are platform-specific; build locally with `npm run build`
+dist/gpx_*
 
 # Release artifacts
 dist/release/*.zip
