@@ -22,6 +22,7 @@ var (
 // buildFrames converts DataPrime result rows into Grafana data frames.
 // The routing logic mirrors the TypeScript framify() in datasource.ts.
 func buildFrames(rows []dataPrimeRow, query string, endTime time.Time) ([]*data.Frame, error) {
+	rows = filterMetadataRows(rows)
 	if len(rows) == 0 {
 		return nil, nil
 	}
@@ -36,6 +37,41 @@ func buildFrames(rows []dataPrimeRow, query string, endTime time.Time) ([]*data.
 	default:
 		return []*data.Frame{toLogsFrame(rows)}, nil
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Metadata row filtering
+// ---------------------------------------------------------------------------
+
+// filterMetadataRows removes DataPrime stream housekeeping rows that are
+// interleaved with result rows in the NDJSON response.
+//
+// The DataPrime streaming API sends result rows inside an envelope
+// ({"result":{"results":[...]}}) which our parser unwraps, leaving rows
+// that always carry a "userData" field.  After the data it also emits bare
+// metadata lines:
+//
+//	{"queryId": "..."}
+//	{"statistics": {"e2eDurationMs": 439, ...}}
+//	{"warning": {"compileWarning": "..."}}
+//
+// These must be discarded before frame construction; leaving them in creates
+// spurious 0-valued alert instances and pollutes table/aggregation frames.
+func filterMetadataRows(rows []dataPrimeRow) []dataPrimeRow {
+	out := rows[:0] // reuse backing array
+	for _, row := range rows {
+		if !isMetadataRow(row) {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+func isMetadataRow(row dataPrimeRow) bool {
+	_, hasQueryID := row["queryId"]
+	_, hasStats := row["statistics"]
+	_, hasWarning := row["warning"]
+	return hasQueryID || hasStats || hasWarning
 }
 
 // ---------------------------------------------------------------------------
